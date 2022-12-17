@@ -28,6 +28,7 @@ class ScoringService(object):
             list: Inference for the given input.
 
         """
+        print(input)
         stations = input['stations']
         waterlevel = input['waterlevel']
         merged = pd.merge(pd.DataFrame(stations, columns=['station']), pd.DataFrame(waterlevel))
