@@ -123,8 +123,9 @@ def main():
     # load the model
     sys.path.append(cwd)
     from predictor import ScoringService
-    from tutorial_transformer import train
-
+    # from tutorial_transformer import train
+    from tutorial_lstm import train
+    
     # train the model
     train(in_all_data)
     
