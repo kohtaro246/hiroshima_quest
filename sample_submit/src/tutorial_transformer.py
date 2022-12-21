@@ -8,10 +8,11 @@ import math
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import random
+from tqdm import tqdm
 
 conf = {
     "seed": 42,
-    "batch_size": 16,
+    "batch_size": 512,
     "num_epoch": 30,
     "dim_model":512,
     "using_columns": ["waterlevel"],
@@ -159,6 +160,40 @@ class HiroshimaQuestDataset(Dataset):
     def __getitem__(self, index):
         return self.src[index], self.tgt[index], self.tgt_y[index]
 
+def preprocess_for_training(basepath, start_date=0, end_date=2190, save_sequence=True):
+    if save_sequence:
+        waterlevel = pd.read_csv(basepath + "waterlevel/data.csv")
+        waterlevel_stations = pd.read_csv(basepath + "waterlevel/stations.csv")
+        waterlevel = waterlevel[(waterlevel["date"]>=start_date) & (waterlevel["date"]<=end_date)]
+        dates = waterlevel["date"].unique().tolist()
+        train_days, val_days = train_test_split(dates, test_size=0.2, random_state=conf["seed"])
+        waterlevel = waterlevel.sort_values(by=["station", "date"])
+        waterlevel_shift = waterlevel.shift(-1).iloc[:-1]
+        waterlevel_shift = waterlevel_shift.drop(columns=["date", "station", "river"])
+        waterlevel = pd.concat([waterlevel, waterlevel_shift], axis=1)
+        waterlevel = waterlevel[waterlevel["date"]!=end_date]
+        train_waterlevel = waterlevel[waterlevel["date"].isin(train_days)]
+        val_waterlevel = waterlevel[waterlevel["date"].isin(val_days)]
+        train_waterlevel = train_waterlevel.drop(columns=["date", "station", "river"])
+        train_waterlevel = train_waterlevel.replace({'M':0.0, '*':0.0, '-':0.0, '--': 0.0, '**':0.0})
+        train_waterlevel = train_waterlevel.fillna(0.0)
+        train_waterlevel = train_waterlevel.astype(float)
+        val_waterlevel = val_waterlevel.drop(columns=["date", "station", "river"])
+        val_waterlevel = val_waterlevel.replace({'M':0.0, '*':0.0, '-':0.0, '--': 0.0, '**':0.0})
+        val_waterlevel = val_waterlevel.fillna(0.0)
+        val_waterlevel = val_waterlevel.astype(float)
+        train_sequence = train_waterlevel.to_numpy()[:,:,np.newaxis]
+        val_sequence = val_waterlevel.to_numpy()[:,:,np.newaxis]
+        np.save("train", train_sequence)
+        np.save("val", val_sequence)
+    else:
+        train_sequence = np.load("train.npy")
+        val_sequence = np.load("val.npy")
+        
+    train_dataset = HiroshimaQuestDataset(train_sequence)
+    val_dataset = HiroshimaQuestDataset(val_sequence)
+
+    return train_dataset, val_dataset
 
 def create_input_dataframe(input, days):
     # 入力する要素を追加する場合はここを変更！
@@ -209,7 +244,7 @@ def create_input_sequence(input):
 def train_loop(model, opt, loss_fn, train_dataloader, device):
     model.train()
     epoch_loss = 0
-    for src_batch, tgt_batch, tgt_y_batch in train_dataloader:
+    for src_batch, tgt_batch, tgt_y_batch in tqdm(train_dataloader):
         src_batch.to(device)
         tgt_batch.to(device)
         tgt_y_batch.to(device)
@@ -229,7 +264,7 @@ def valid_loop(model, loss_fn, val_dataloader, device):
     model.eval()
     total_loss = 0
     with torch.no_grad():
-        for src_batch, tgt_batch, tgt_y_batch in val_dataloader:
+        for src_batch, tgt_batch, tgt_y_batch in tqdm(val_dataloader):
             src_batch.to(device)
             tgt_batch.to(device)
             tgt_y_batch.to(device)
@@ -243,18 +278,10 @@ def valid_loop(model, loss_fn, val_dataloader, device):
         
     return total_loss / len(val_dataloader)
 
-
-
-
-
-    
-
-    
-
-
-def train(input):
+def train(basepath, start_date=0, end_date=2190, save_sequence=True):
     torch_fix_seed()
-    train_dataset, val_dataset = create_input_sequence(input)
+    #train_dataset, val_dataset = create_input_sequence(input)
+    train_dataset, val_dataset = preprocess_for_training(basepath, start_date, end_date, save_sequence)
     train_dataloader = DataLoader(train_dataset, batch_size=conf["batch_size"], shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=conf["batch_size"], shuffle=True)
 
@@ -270,30 +297,18 @@ def train(input):
 
     for epoch in range(conf["num_epoch"]):
         print("-"*25, f"Epoch {epoch + 1}","-"*25)
+        print("Training")
         train_loss = train_loop(model, opt, loss_fn, train_dataloader, device)
         train_loss_list += [train_loss]
+        print("Validating")
         validation_loss = valid_loop(model, loss_fn, val_dataloader, device)
         validation_loss_list += [validation_loss]
         print(f"Training loss: {math.sqrt(train_loss):.4f}")
         print(f"Validation loss: {math.sqrt(validation_loss):.4f}")
 
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
 if __name__ == "__main__":
-    preprocess("a")
+    basepath = "/home/mil/k-tanaka/semi/hiroshima_quest/train/"
+    start_date = 0
+    end_date = 2190
+    save_sequence = True
+    train(basepath, start_date, end_date, save_sequence)
