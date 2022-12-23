@@ -9,18 +9,29 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import random
 from tqdm import tqdm
+import os
+import glob
 
+# パラメータ
 conf = {
-    "seed": 42,
-    "batch_size": 512,
-    "num_epoch": 30,
-    "dim_model":512,
-    "using_columns": ["waterlevel"],
-    "src_seq_len": 24,
-    "tgt_seq_len": 24
+    "seed": 42,                            # ランダム値の生成を固定する
+    "batch_size": 512,                     # １つのバッチに含まれるデータ数
+    "num_epoch": 30,                       # エポック数
+    "dim_model": 64,                       # モデルの次元。次元が大きいほど複雑なパターンを学習できる一方、大きくしすぎると過学習したり、推論に時間がかかる
+    "num_features": 2,                     # 入力するデータの種類の数
+    "src_seq_len": 24,                     # 入力するデータの時系列方向の次元。24時間分データであれば24次元
+    "tgt_seq_len": 24,                     # 出力するデータの時系列方向の次元。24時間分データであれば24次元
+    "dropout": 0.1,                        # 過学習を抑えるため、一部の重みを０にする割合。0.1なら1割の重みを0にする
+    "test_size": 0.2,                      # validation setの割合。0.2の場合、全データのうち８割が
+    "learning_rate": 0.0005,               # 学習率
+    "num_heads": 2,                        # transformerのhead数
+    "num_layers": 3                        # transformerのlayer数
 }
 
 def torch_fix_seed():
+    """
+    ランダム値の生成を固定する。
+    """
     seed = conf["seed"]
     # Python random
     random.seed(seed)
@@ -33,37 +44,26 @@ def torch_fix_seed():
     torch.use_deterministic_algorithms = True
 
 class PositionalEncoding(nn.Module):
+    """
+    モデルに入力するデータの時系列的順番に関する情報を埋め込むためのクラス。変更する必要はあまりないと思われる。
+    """
     def __init__(self, dim_model, dropout_p, max_len):
         super().__init__()
-        # Modified version from: https://pytorch.org/tutorials/beginner/transformer_tutorial.html
-        # max_len determines how far the position can have an effect on a token (window)
-        
-        # Info
         self.dropout = nn.Dropout(dropout_p)
-        
-        # Encoding - From formula
         pos_encoding = torch.zeros(max_len, dim_model)
         positions_list = torch.arange(0, max_len, dtype=torch.float).view(-1, 1) # 0, 1, 2, 3, 4, 5
         division_term = torch.exp(torch.arange(0, dim_model, 2).float() * (-math.log(10000.0)) / dim_model) # 1000^(2i/dim_model)
-        
-        # PE(pos, 2i) = sin(pos/1000^(2i/dim_model))
         pos_encoding[:, 0::2] = torch.sin(positions_list * division_term)
-        
-        # PE(pos, 2i + 1) = cos(pos/1000^(2i/dim_model))
         pos_encoding[:, 1::2] = torch.cos(positions_list * division_term)
-        
-        # Saving buffer (same as parameter without gradients needed)
         pos_encoding = pos_encoding.unsqueeze(0).transpose(0, 1)
         self.register_buffer("pos_encoding",pos_encoding)
         
     def forward(self, token_embedding: torch.tensor) -> torch.tensor:
-        # Residual connection + pos encoding
         return self.dropout(token_embedding + self.pos_encoding[:token_embedding.size(0), :]) 
 
 class Transformer(nn.Module):
     """
-    Model from "A detailed guide to Pytorch's nn.Transformer() module.", by
-    Daniel Melchor: https://medium.com/p/c80afbc9ffb1/
+    モデルを定義するクラス
     """
     # Constructor
     def __init__(
@@ -72,7 +72,6 @@ class Transformer(nn.Module):
         dim_model,
         num_heads,
         num_encoder_layers,
-        num_decoder_layers,
         dropout_p,
     ):
         super().__init__()
@@ -99,15 +98,6 @@ class Transformer(nn.Module):
             in_features=1, # the number of features you want to predict. Usually just 1 
             out_features=dim_model
         ) 
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=dim_model,
-            nhead=num_heads,
-            batch_first=True
-        )
-        self.decoder = nn.TransformerDecoder(
-            decoder_layer=decoder_layer,
-            num_layers=num_decoder_layers
-        )
         self.linear_mapping = nn.Linear(
             in_features=dim_model,
             out_features=1
@@ -117,86 +107,151 @@ class Transformer(nn.Module):
         src = self.encoder_input_layer(src)
         src = self.positional_encoder(src)
         src = self.encoder(src=src)
-        decoder_output = self.decoder_input_layer(tgt)
-        decoder_output = self.decoder(
-            tgt=decoder_output,
-            memory=src,
-            tgt_mask=tgt_mask,
-            memory_mask=src_mask
-        )
-        decoder_output = self.linear_mapping(decoder_output)
-        return decoder_output
-      
-    def get_tgt_mask(self, size) -> torch.tensor:
-        # Generates a squeare matrix where the each row allows one word more to be seen
-        mask = torch.tril(torch.ones(size, size) == 1) # Lower triangular matrix
-        mask = mask.float()
-        mask = mask.masked_fill(mask == 0, float('-inf')) # Convert zeros to -inf
-        mask = mask.masked_fill(mask == 1, float(0.0)) # Convert ones to 0
-        
-        # EX for size=5:
-        # [[0., -inf, -inf, -inf, -inf],
-        #  [0.,   0., -inf, -inf, -inf],
-        #  [0.,   0.,   0., -inf, -inf],
-        #  [0.,   0.,   0.,   0., -inf],
-        #  [0.,   0.,   0.,   0.,   0.]]
-        
-        return mask
-    
-    def create_pad_mask(self, matrix: torch.tensor, pad_token: int) -> torch.tensor:
-        # If matrix = [1,2,3,0,0,0] where pad_token=0, the result mask is
-        # [False, False, False, True, True, True]
-        return (matrix == pad_token)
+        output = self.linear_mapping(src)
+        return output.squeeze(-1)
 
 class HiroshimaQuestDataset(Dataset):
-    def __init__(self, sequence):
-        self.src = torch.FloatTensor(sequence[:, :conf["src_seq_len"]]).to("cuda")
-        self.tgt = torch.FloatTensor(sequence[:, conf["src_seq_len"]-1:-1]).to("cuda")
-        self.tgt_y = torch.FloatTensor(sequence[:, conf["src_seq_len"]:]).to("cuda")
+    """
+    dataset classの作成。前処理出力形式を変更しない限りはいじる必要はない
+    """
+    def __init__(self, src, tgt, device):
+        """
+        src: (データ数、num_features, src_seq_len)
+        tgt: ()
+        """
+        assert src.shape == (tgt.shape[0], conf["num_features"], conf["src_seq_len"])
+
+        self.src = torch.FloatTensor(src).permute(0,2,1).to(device)
+        self.tgt = torch.FloatTensor(tgt).to(device)
     
     def __len__(self):
         return len(self.src)
 
     def __getitem__(self, index):
-        return self.src[index], self.tgt[index], self.tgt_y[index]
+        return self.src[index], self.tgt[index]
 
-def preprocess_for_training(basepath, start_date=0, end_date=2190, save_sequence=True):
+def preprocess_for_training(basepath, device, start_date=0, end_date=2190, save_sequence=True):
+    """
+    データの前処理
+
+
+    """
+    def _missing_value_process(df):
+        """
+        欠損値処理・型変換・重複削除
+        """
+        df = df.replace({'M':0.0, '*':0.0, '-':0.0, '--': 0.0, '**':0.0})
+        df = df.fillna(0.0)
+        hour_columns = list(df.columns[3:])
+        type_conversion_dict = {k: float for k in hour_columns}
+        df = df.astype(type_conversion_dict)
+        #df = df.drop_duplicates()
+        return df
+
+    def _src_tgt_using(df, start_date, end_date):
+        """
+        "src_using"というカラムがTrueの行は訓練時の入力に用い、"tgt_using"というカラムがTrueの行は教師データに使うように、2つのカラムを追加する。
+        使う行と使わない行が発生するのは以下の２つの理由による。
+        ・各観測所で抜けている日にちがある場合がある。0~2190のうち1454だけ抜けていた場合、訓練時の入力に1453は使わず、教師データで1455は使わない。
+        ・0日目は教師データとしては使わない。一方、2190日目は訓練時の入力には使わない。
+        """
+
+        df = df.sort_values(by=["station", "date"])
+        date_list = df["date"].to_numpy()[:-1]
+        shifted_date_list = df["date"].to_numpy()[1:]
+        diff = shifted_date_list - date_list - 1
+        src_using_list = np.concatenate([np.where(diff==0, True, False), np.array([False])])
+        tgt_using_list = np.concatenate([np.array([False]), np.where(diff==0, True, False)])
+        df["src_using"] = src_using_list
+        df["tgt_using"] = tgt_using_list
+        return df
+
+    def _add_rainfall_data(waterlevel, rainfall):
+        """
+        入力情報の例として、「栗谷」という観測所での降雨量データを水位データに加えてみる。
+        """
+        rainfall = rainfall[rainfall["station"] == "栗谷"]
+        hour_columns = list(rainfall.columns[3:])
+        column_rename_dict = {k: "rainfall_"+k for k in hour_columns}
+        rainfall = rainfall.rename(columns=column_rename_dict)
+        data = pd.merge(waterlevel, rainfall, on="date")
+        data = data.sort_values(by=["station_x", "date"])
+        return data
+
     if save_sequence:
+        # データの読み込み・欠損値処理
+        print("Processing waterlevel data")
         waterlevel = pd.read_csv(basepath + "waterlevel/data.csv")
         waterlevel_stations = pd.read_csv(basepath + "waterlevel/stations.csv")
         waterlevel = waterlevel[(waterlevel["date"]>=start_date) & (waterlevel["date"]<=end_date)]
-        dates = waterlevel["date"].unique().tolist()
-        train_days, val_days = train_test_split(dates, test_size=0.2, random_state=conf["seed"])
-        waterlevel = waterlevel.sort_values(by=["station", "date"])
-        waterlevel_shift = waterlevel.shift(-1).iloc[:-1]
-        waterlevel_shift = waterlevel_shift.drop(columns=["date", "station", "river"])
-        waterlevel = pd.concat([waterlevel, waterlevel_shift], axis=1)
-        waterlevel = waterlevel[waterlevel["date"]!=end_date]
-        train_waterlevel = waterlevel[waterlevel["date"].isin(train_days)]
-        val_waterlevel = waterlevel[waterlevel["date"].isin(val_days)]
-        train_waterlevel = train_waterlevel.drop(columns=["date", "station", "river"])
-        train_waterlevel = train_waterlevel.replace({'M':0.0, '*':0.0, '-':0.0, '--': 0.0, '**':0.0})
-        train_waterlevel = train_waterlevel.fillna(0.0)
-        train_waterlevel = train_waterlevel.astype(float)
-        val_waterlevel = val_waterlevel.drop(columns=["date", "station", "river"])
-        val_waterlevel = val_waterlevel.replace({'M':0.0, '*':0.0, '-':0.0, '--': 0.0, '**':0.0})
-        val_waterlevel = val_waterlevel.fillna(0.0)
-        val_waterlevel = val_waterlevel.astype(float)
-        train_sequence = train_waterlevel.to_numpy()[:,:,np.newaxis]
-        val_sequence = val_waterlevel.to_numpy()[:,:,np.newaxis]
-        np.save("train", train_sequence)
-        np.save("val", val_sequence)
-    else:
-        train_sequence = np.load("train.npy")
-        val_sequence = np.load("val.npy")
+        waterlevel = _missing_value_process(waterlevel)
+        waterlevel = _src_tgt_using(waterlevel, start_date, end_date)
+
+        print("Processing rainfall data")
+        rainfall = pd.read_csv(basepath + "rainfall/data.csv")
+        rainfall_stations = pd.read_csv(basepath + "rainfall/stations.csv")
+        rainfall = rainfall[(rainfall["date"]>=start_date) & (rainfall["date"]<=end_date)]
+        rainfall = _missing_value_process(rainfall)
+
+        print("Processing tidelevel data")
+        tidelevel = pd.read_csv(basepath + "tidelevel/data.csv")
+        tidelevel_stations = pd.read_csv(basepath + "tidelevel/stations.csv")
+        tidelevel = tidelevel[(tidelevel["date"]>=start_date) & (tidelevel["date"]<=end_date)]
+        tidelevel = _missing_value_process(tidelevel)
+
+        # 入力データの作成 - 入力データを追加したければここにコードを追記する
+        # 例として、1つの降水量観測所('栗谷')の降雨量データと水位データを入力とするコードを作成する
+        print("Creating input data")
+        input_data = _add_rainfall_data(waterlevel, rainfall)  # 入力項目を追加する
+        input_data = input_data.fillna(0.0)                    # rainfallで欠損している日にちは0埋めする
+        input_data = input_data[input_data["src_using"]]       # 訓練時の入力で使用するデータのみ抽出
         
-    train_dataset = HiroshimaQuestDataset(train_sequence)
-    val_dataset = HiroshimaQuestDataset(val_sequence)
+        # train setとvalidation setに分ける
+        dates = input_data["date"].unique().tolist()
+        src_train_days, _ = train_test_split(dates, test_size=conf["test_size"], random_state=conf["seed"])      # 日にちでtrain setとvalidation setに分ける。
+        input_data["train"] = input_data["date"].isin(src_train_days)
+        tgt_train_days = np.array(src_train_days) + 1
+        waterlevel["train"] = waterlevel["date"].isin(tgt_train_days)
+        
+        input_dataframe = input_data #debug
+        train_input_data = input_data[input_data["train"]]
+        train_input_dataframe =  train_input_data #debug
+        val_input_data = input_data[~input_data["train"]]
+        train_input_data = np.reshape(train_input_data.drop(columns=["date", "station_x", "river", "station_y", "city", "src_using", "tgt_using", "train"]).to_numpy(), (-1,2,24))
+        val_input_data = np.reshape(val_input_data.drop(columns=["date", "station_x", "river", "station_y", "city", "src_using", "tgt_using", "train"]).to_numpy(), (-1,2,24))
+        
+        # 教師データの作成
+        print("Creating target data")
+        tgt_data = waterlevel[waterlevel["tgt_using"]]
+        tgt_dataframe = tgt_data #debug
+        train_tgt_data = tgt_data[tgt_data["train"]]
+        train_tgt_dataframe = train_tgt_data #debug
+        val_tgt_data = tgt_data[~tgt_data["train"]]
+        train_tgt_data = train_tgt_data.drop(columns=["date", "station", "river", "src_using", "tgt_using", "train"]).to_numpy()
+        val_tgt_data = val_tgt_data.drop(columns=["date", "station", "river", "src_using", "tgt_using", "train"]).to_numpy()
+
+        # dataの保存
+        np.save("../../train_input_data", train_input_data)
+        np.save("../../val_input_data", val_input_data)
+        np.save("../../train_tgt_data", train_tgt_data)
+        np.save("../../val_tgt_data", val_tgt_data)
+    
+    else:
+        print("Loading saved data")
+        train_input_data = np.load("../../train_input_data.npy")
+        val_input_data = np.load("../../val_input_data.npy")
+        train_tgt_data = np.load("../../train_tgt_data.npy")
+        val_tgt_data = np.load("../../val_tgt_data.npy")
+
+    # datasetのインスタンス化
+    print("Instantiate dataset")
+    train_dataset = HiroshimaQuestDataset(train_input_data, train_tgt_data, device)
+    val_dataset = HiroshimaQuestDataset(val_input_data, val_tgt_data, device)
 
     return train_dataset, val_dataset
 
 def create_input_dataframe(input, days):
-    # 入力する要素を追加する場合はここを変更！
+    # 推論時の
     df = None
     for day in days:
         data = input[day]
@@ -207,7 +262,6 @@ def create_input_dataframe(input, days):
     df['value'] = df['value'].replace({'M':0.0, '*':0.0, '-':0.0, '--': 0.0, '**':0.0})
     df['value'] = df['value'].fillna(0.0)
     df['value'] = df['value'].astype(float)
-    df = df.rename(columns={'value': 'waterlevel'})
     return df
 
 
@@ -244,16 +298,12 @@ def create_input_sequence(input):
 def train_loop(model, opt, loss_fn, train_dataloader, device):
     model.train()
     epoch_loss = 0
-    for src_batch, tgt_batch, tgt_y_batch in tqdm(train_dataloader):
+    for src_batch, tgt_batch in tqdm(train_dataloader):
         src_batch.to(device)
         tgt_batch.to(device)
-        tgt_y_batch.to(device)
 
-        sequence_length = tgt_batch.size(1)
-        tgt_mask = model.get_tgt_mask(sequence_length).to(device)
-
-        pred = model(src_batch, tgt_batch, tgt_mask) 
-        loss = loss_fn(pred, tgt_y_batch)
+        pred = model(src_batch, tgt_batch) 
+        loss = loss_fn(pred, tgt_batch)
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -264,37 +314,31 @@ def valid_loop(model, loss_fn, val_dataloader, device):
     model.eval()
     total_loss = 0
     with torch.no_grad():
-        for src_batch, tgt_batch, tgt_y_batch in tqdm(val_dataloader):
+        for src_batch, tgt_batch in tqdm(val_dataloader):
             src_batch.to(device)
             tgt_batch.to(device)
-            tgt_y_batch.to(device)
 
-            sequence_length = tgt_batch.size(1)
-            tgt_mask = model.get_tgt_mask(sequence_length).to(device)
-
-            pred = model(src_batch, tgt_batch, tgt_mask) 
-            loss = loss_fn(pred, tgt_y_batch)
+            pred = model(src_batch, tgt_batch) 
+            loss = loss_fn(pred, tgt_batch)
             total_loss += loss.detach().item()
         
     return total_loss / len(val_dataloader)
 
-def train(basepath, start_date=0, end_date=2190, save_sequence=True):
+def train(basepath, device, start_date=0, end_date=2190, save_sequence=True):
     torch_fix_seed()
-    #train_dataset, val_dataset = create_input_sequence(input)
-    train_dataset, val_dataset = preprocess_for_training(basepath, start_date, end_date, save_sequence)
+    train_dataset, val_dataset = preprocess_for_training(basepath, device, start_date, end_date, save_sequence)
     train_dataloader = DataLoader(train_dataset, batch_size=conf["batch_size"], shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=conf["batch_size"], shuffle=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = Transformer(
-        in_num_features=len(conf["using_columns"]), dim_model=conf["dim_model"], num_heads=2, num_encoder_layers=3, num_decoder_layers=3, dropout_p=0.1
+        in_num_features=conf["num_features"], dim_model=conf["dim_model"], num_heads=conf["num_heads"], num_encoder_layers=conf["num_layers"], dropout_p=conf["dropout"]
     ).to(device)
-    opt = torch.optim.SGD(model.parameters(), lr=0.001)
+    opt = torch.optim.SGD(model.parameters(), lr=conf["learning_rate"])
     loss_fn = nn.MSELoss()
 
     train_loss_list = []
     validation_loss_list = []
-
+    min_validation_loss = 999999999.9
     for epoch in range(conf["num_epoch"]):
         print("-"*25, f"Epoch {epoch + 1}","-"*25)
         print("Training")
@@ -305,10 +349,17 @@ def train(basepath, start_date=0, end_date=2190, save_sequence=True):
         validation_loss_list += [validation_loss]
         print(f"Training loss: {math.sqrt(train_loss):.4f}")
         print(f"Validation loss: {math.sqrt(validation_loss):.4f}")
+        if validation_loss < min_validation_loss:
+            min_validation_loss = validation_loss
+            model_list = glob.glob("../model/*")
+            for prev_model in model_list:
+                os.remove(prev_model)
+            torch.save(model.state_dict(), "../model/best.pt")
 
 if __name__ == "__main__":
     basepath = "/home/mil/k-tanaka/semi/hiroshima_quest/train/"
     start_date = 0
     end_date = 2190
     save_sequence = True
-    train(basepath, start_date, end_date, save_sequence)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    train(basepath, device, start_date, end_date, save_sequence)

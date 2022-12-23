@@ -12,7 +12,7 @@ class ScoringService(object):
         Returns:
             bool: The return value. True for success.
         """
-        cls.model = None
+        cls.model = "../model/best.pt"
 
         return True
 
@@ -28,13 +28,16 @@ class ScoringService(object):
             list: Inference for the given input.
 
         """
-        print(input)
+        def _
         stations = input['stations']
         waterlevel = input['waterlevel']
+        rainfall = input['rainfall']
+        tidelevel = input['tidelevel']
         merged = pd.merge(pd.DataFrame(stations, columns=['station']), pd.DataFrame(waterlevel))
         merged['value'] = merged['value'].replace({'M':0.0, '*':0.0, '-':0.0, '--': 0.0, '**':0.0})
         merged['value'] = merged['value'].fillna(0.0)
         merged['value'] = merged['value'].astype(float)
+        breakpoint()
         prediction = merged[['hour', 'station', 'value']].to_dict('records')
 
         return prediction
