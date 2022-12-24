@@ -327,6 +327,6 @@ if __name__ == "__main__":
     basepath = "/home/mil/k-tanaka/semi/hiroshima_quest/train/"
     start_date = 0
     end_date = 2190
-    save_sequence = False
+    save_sequence = True
     device = "cuda" if torch.cuda.is_available() else "cpu"
     train(basepath, device, start_date, end_date, save_sequence)
