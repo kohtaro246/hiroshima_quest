@@ -103,7 +103,7 @@ class Transformer(nn.Module):
             out_features=1
         )
         
-    def forward(self, src, tgt, tgt_mask=None, src_pad_mask=None, tgt_pad_mask=None, src_mask=None):
+    def forward(self, src, tgt=None, tgt_mask=None, src_pad_mask=None, tgt_pad_mask=None, src_mask=None):
         src = self.encoder_input_layer(src)
         src = self.positional_encoder(src)
         src = self.encoder(src=src)
@@ -117,10 +117,10 @@ class HiroshimaQuestDataset(Dataset):
     def __init__(self, src, tgt, device):
         """
         src: (データ数、num_features, src_seq_len)
-        tgt: ()
+        tgt: (データ数, tgt_seq_len)
         """
         assert src.shape == (tgt.shape[0], conf["num_features"], conf["src_seq_len"])
-
+        assert tgt.shape[1] == conf["tgt_seq_len"]
         self.src = torch.FloatTensor(src).permute(0,2,1).to(device)
         self.tgt = torch.FloatTensor(tgt).to(device)
     
@@ -250,51 +250,6 @@ def preprocess_for_training(basepath, device, start_date=0, end_date=2190, save_
 
     return train_dataset, val_dataset
 
-def create_input_dataframe(input, days):
-    # 推論時の
-    df = None
-    for day in days:
-        data = input[day]
-        stations = data['stations']
-        waterlevel = data['waterlevel']
-        merged = pd.merge(pd.DataFrame(stations, columns=['station']), pd.DataFrame(waterlevel))
-        df = pd.concat([df, merged])
-    df['value'] = df['value'].replace({'M':0.0, '*':0.0, '-':0.0, '--': 0.0, '**':0.0})
-    df['value'] = df['value'].fillna(0.0)
-    df['value'] = df['value'].astype(float)
-    return df
-
-
-def create_input_sequence(input):
-    """Create input data
-
-        Args:
-            input: Data of the sample you want to make inference from (dict)
-
-        Returns:
-            list: 
-
-        """
-    train_val_days = list(input.keys())[:-1]
-    train_days, val_days = train_test_split(train_val_days, test_size=0.2, random_state=conf["seed"]) # 本当にこの分け方がいいの？
-    sequence = np.zeros((0, 48, len(conf["using_columns"])))
-    for day in train_days:
-        df = create_input_dataframe(input, [day, day+1])
-        for station in df["station"].unique().tolist():
-            src_tgt_seq = df.loc[df["station"]==station, conf["using_columns"]].to_numpy()
-            sequence = np.concatenate([sequence, src_tgt_seq[None]])
-    train_dataset = HiroshimaQuestDataset(sequence)
-
-    sequence = np.zeros((0, 48, len(conf["using_columns"])))
-    for day in val_days:
-        df = create_input_dataframe(input, [day, day+1])
-        for station in df["station"].unique().tolist():
-            src_tgt_seq = df.loc[df["station"]==station, conf["using_columns"]].to_numpy()
-            sequence = np.concatenate([sequence, src_tgt_seq[None]])
-    val_dataset = HiroshimaQuestDataset(sequence)
-
-    return train_dataset, val_dataset
-
 def train_loop(model, opt, loss_fn, train_dataloader, device):
     model.train()
     epoch_loss = 0
@@ -302,7 +257,7 @@ def train_loop(model, opt, loss_fn, train_dataloader, device):
         src_batch.to(device)
         tgt_batch.to(device)
 
-        pred = model(src_batch, tgt_batch) 
+        pred = model(src_batch) 
         loss = loss_fn(pred, tgt_batch)
         opt.zero_grad()
         loss.backward()
@@ -318,7 +273,7 @@ def valid_loop(model, loss_fn, val_dataloader, device):
             src_batch.to(device)
             tgt_batch.to(device)
 
-            pred = model(src_batch, tgt_batch) 
+            pred = model(src_batch) 
             loss = loss_fn(pred, tgt_batch)
             total_loss += loss.detach().item()
         
@@ -356,10 +311,22 @@ def train(basepath, device, start_date=0, end_date=2190, save_sequence=True):
                 os.remove(prev_model)
             torch.save(model.state_dict(), "../model/best.pt")
 
+def make_prediction(input_data, model_path, device):
+    model = Transformer(
+        in_num_features=conf["num_features"], dim_model=conf["dim_model"], num_heads=conf["num_heads"], num_encoder_layers=conf["num_layers"], dropout_p=conf["dropout"]
+    )
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    input_tensor = torch.FloatTensor(input_data).to(device)
+    with torch.no_grad():
+        pred = model(input_tensor)
+    return torch.flatten(pred).tolist()
+
+    
+
 if __name__ == "__main__":
     basepath = "/home/mil/k-tanaka/semi/hiroshima_quest/train/"
     start_date = 0
     end_date = 2190
-    save_sequence = True
+    save_sequence = False
     device = "cuda" if torch.cuda.is_available() else "cpu"
     train(basepath, device, start_date, end_date, save_sequence)
