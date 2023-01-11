@@ -1,2 +1,5 @@
 *.npy
 __pycache__/
+*.zip
+*.pt
+*.h5
