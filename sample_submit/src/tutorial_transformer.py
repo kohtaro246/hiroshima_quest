@@ -18,7 +18,7 @@ conf = {
     "batch_size": 512,                     # １つのバッチに含まれるデータ数
     "num_epoch": 30,                       # エポック数
     "dim_model": 64,                       # モデルの次元。次元が大きいほど複雑なパターンを学習できる一方、大きくしすぎると過学習したり、推論に時間がかかる
-    "num_features": 409,                     # 入力するデータの種類の数
+    "num_features": 3,                     # 入力するデータの種類の数
     "src_seq_len": 24,                     # 入力するデータの時系列方向の次元。24時間分データであれば24次元
     "tgt_seq_len": 24,                     # 出力するデータの時系列方向の次元。24時間分データであれば24次元
     "dropout": 0.1,                        # 過学習を抑えるため、一部の重みを０にする割合。0.1なら1割の重みを0にする
@@ -57,9 +57,9 @@ class PositionalEncoding(nn.Module):
         pos_encoding[:, 1::2] = torch.cos(positions_list * division_term)
         pos_encoding = pos_encoding.unsqueeze(0).transpose(0, 1)
         self.register_buffer("pos_encoding",pos_encoding)
-        
+
     def forward(self, token_embedding: torch.tensor) -> torch.tensor:
-        return self.dropout(token_embedding + self.pos_encoding[:token_embedding.size(0), :]) 
+        return self.dropout(token_embedding + self.pos_encoding[:token_embedding.size(0), :])
 
 class Transformer(nn.Module):
     """
@@ -97,12 +97,12 @@ class Transformer(nn.Module):
         self.decoder_input_layer = nn.Linear(
             in_features=1, # the number of features you want to predict. Usually just 1 
             out_features=dim_model
-        ) 
+        )
         self.linear_mapping = nn.Linear(
             in_features=dim_model,
             out_features=1
         )
-        
+
     def forward(self, src, tgt=None, tgt_mask=None, src_pad_mask=None, tgt_pad_mask=None, src_mask=None):
         src = self.encoder_input_layer(src)
         src = self.positional_encoder(src)
@@ -123,7 +123,7 @@ class HiroshimaQuestDataset(Dataset):
         assert tgt.shape[1] == conf["tgt_seq_len"]
         self.src = torch.FloatTensor(src).permute(0,2,1).to(device)
         self.tgt = torch.FloatTensor(tgt).to(device)
-    
+
     def __len__(self):
         return len(self.src)
 
@@ -166,48 +166,31 @@ def preprocess_for_training(basepath, device, start_date=0, end_date=2190, save_
         df["tgt_using"] = tgt_using_list
         return df
 
-    def _add_rainfall_data(waterlevel, rainfall):
+    def _add_rainfall_data(waterlevel, rainfall: pd.DataFrame):
         """
-        入力情報の例として、「栗谷」という観測所での降雨量データを水位データに加えてみる。
+        全観測地点の雨量の平均をデータに追加
         """
-        #rainfall = rainfall[rainfall["station"] == "栗谷"]
-        rainfall["station_name"] = rainfall["station"]+rainfall["city"]
-        stations = rainfall["station_name"].unique().tolist()
-        original_waterlevel = waterlevel
-        waterlevel_columns = waterlevel.columns.tolist()
-        dataframes = [original_waterlevel]
-        for i, station in enumerate(tqdm(stations)):
-            station_rainfall = rainfall[rainfall["station_name"] == station]
-            station_rainfall = station_rainfall.drop_duplicates(subset=['date'])
-            hour_columns = list(rainfall.columns[3:-1])
-            column_rename_dict = {k: "{}_".format(station)+k for k in hour_columns}
-            station_rainfall = station_rainfall.rename(columns=column_rename_dict)
-            station_rainfall = station_rainfall.drop(columns=["station", "city", "station_name"])
-            rainfall_df = pd.merge(original_waterlevel, station_rainfall, on="date", how="left")
-            rainfall_df = rainfall_df.drop(columns=waterlevel_columns)
-            dataframes.append(rainfall_df)
-        waterlevel_rainfall = pd.concat(dataframes, axis=1)
+        rainfall = rainfall.drop(columns=["station", "city"])
+        rainfall = rainfall.groupby("date").mean()
+        columns = {col: 'rainfall_' + col for col in rainfall.columns}
+        rainfall = rainfall.rename(columns=columns)
+        waterlevel_rainfall = pd.merge(waterlevel, rainfall, on=["date"], how="left")
         waterlevel_rainfall = waterlevel_rainfall.sort_values(by=["station", "date"])
         waterlevel_rainfall = waterlevel_rainfall.fillna(0.0)
         return waterlevel_rainfall
 
     def _add_tidelevel_data(waterlevel, tidelevel):
         """
-        入力情報の例として、「栗谷」という観測所での降雨量データを水位データに加えてみる。
+        全観測地点の水位の平均をデータに追加
         """
-        tidelevel["station_name"] = tidelevel["station"]+tidelevel["city"]
-        stations = tidelevel["station_name"].unique().tolist()
-        original_waterlevel = waterlevel
-        for i, station in enumerate(tqdm(stations)):
-            station_tidelevel = tidelevel[tidelevel["station_name"] == station]
-            hour_columns = list(tidelevel.columns[3:-1])
-            column_rename_dict = {k: "{}_".format(station)+k for k in hour_columns}
-            station_tidelevel = station_tidelevel.rename(columns=column_rename_dict)
-            station_tidelevel = station_tidelevel.drop(columns=["station", "city", "station_name"])
-            waterlevel = pd.merge(waterlevel, station_tidelevel, on="date", how="left")
-        waterlevel = waterlevel.sort_values(by=["station", "date"])
-        waterlevel = waterlevel.fillna(0.0)
-        return waterlevel
+        tidelevel = tidelevel.drop(columns=["station", "city"])
+        tidelevel = tidelevel.groupby("date").mean()
+        columns = {col: 'tidelevel_' + col for col in tidelevel.columns}
+        tidelevel = tidelevel.rename(columns=columns)
+        waterlevel_tidelevel = pd.merge(waterlevel, tidelevel, on=["date"], how="left")
+        waterlevel_tidelevel = waterlevel_tidelevel.sort_values(by=["station", "date"])
+        waterlevel_tidelevel = waterlevel_tidelevel.fillna(0.0)
+        return waterlevel_tidelevel
 
     if save_sequence:
         # データの読み込み・欠損値処理
@@ -235,20 +218,20 @@ def preprocess_for_training(basepath, device, start_date=0, end_date=2190, save_
         # 入力データの作成 - 入力データを追加したければここにコードを追記する
         # 例として、1つの降水量観測所('栗谷')の降雨量データと水位データを入力とするコードを作成する
         print("Creating input data")
-        #input_data = _add_tidelevel_data(waterlevel, tidelevel)
-        input_data = _add_rainfall_data(waterlevel, rainfall)  # 入力項目を追加する
+        input_data = _add_tidelevel_data(waterlevel, tidelevel)
+        input_data = _add_rainfall_data(input_data, rainfall)  # 入力項目を追加する
         input_data = input_data.fillna(0.0)                    # rainfallで欠損している日にちは0埋めする
         input_data = input_data[input_data["src_using"]]       # 訓練時の入力で使用するデータのみ抽出
         print(input_data)
         print(input_data.columns)
-        
+
         # train setとvalidation setに分ける
         dates = input_data["date"].unique().tolist()
         src_train_days, _ = train_test_split(dates, test_size=conf["test_size"], random_state=conf["seed"])      # 日にちでtrain setとvalidation setに分ける。
         input_data["train"] = input_data["date"].isin(src_train_days)
         tgt_train_days = np.array(src_train_days) + 1
         waterlevel["train"] = waterlevel["date"].isin(tgt_train_days)
-        
+
         input_dataframe = input_data #debug
         train_input_data = input_data[input_data["train"]]
         train_input_dataframe =  train_input_data #debug
@@ -259,7 +242,7 @@ def preprocess_for_training(basepath, device, start_date=0, end_date=2190, save_
         train_input_data = np.reshape(dropped_train_input_data, (-1,conf["num_features"],24))
         val_input_data = np.reshape(dropped_val_input_data, (-1,conf["num_features"],24))
         print(train_input_data.shape)
-        
+
         # 教師データの作成
         print("Creating target data")
         tgt_data = waterlevel[waterlevel["tgt_using"]]
@@ -275,7 +258,7 @@ def preprocess_for_training(basepath, device, start_date=0, end_date=2190, save_
         np.save("../../val_input_data", val_input_data)
         np.save("../../train_tgt_data", train_tgt_data)
         np.save("../../val_tgt_data", val_tgt_data)
-    
+
     else:
         print("Loading saved data")
         train_input_data = np.load("../../train_input_data.npy")
@@ -297,7 +280,7 @@ def train_loop(model, opt, loss_fn, train_dataloader, device):
         src_batch.to(device)
         tgt_batch.to(device)
 
-        pred = model(src_batch) 
+        pred = model(src_batch)
         loss = loss_fn(pred, tgt_batch)
         opt.zero_grad()
         loss.backward()
@@ -313,10 +296,10 @@ def valid_loop(model, loss_fn, val_dataloader, device):
             src_batch.to(device)
             tgt_batch.to(device)
 
-            pred = model(src_batch) 
+            pred = model(src_batch)
             loss = loss_fn(pred, tgt_batch)
             total_loss += loss.detach().item()
-        
+
     return total_loss / len(val_dataloader)
 
 def train(basepath, device, start_date=0, end_date=2190, save_sequence=True):
@@ -361,7 +344,7 @@ def make_prediction(input_data, model_path, device):
         pred = model(input_tensor)
     return torch.flatten(pred).tolist()
 
-    
+
 
 if __name__ == "__main__":
     basepath = "/home/mil/k-tanaka/semi/hiroshima_quest/train/"
